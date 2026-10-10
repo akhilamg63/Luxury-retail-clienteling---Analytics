@@ -1,0 +1,327 @@
+// =========================================================================
+// Luxury Retail CRM & Clienteling Analytics - Power BI DAX measures
+//
+// Model: star schema with Transactions as the fact table (see star_schema.md).
+// Every measure below matches the Python definition in src/kpis.py one for
+// one, so the Power BI report and the Streamlit dashboard cannot disagree.
+//
+// Conventions
+//   * is_return is imported as a TRUE/FALSE column, not text.
+//   * Net Sales excludes returned lines everywhere. There is no measure in
+//     this file that silently includes them.
+//   * 'Date' is a marked date table; all time intelligence uses it.
+// =========================================================================
+
+
+// -------------------------------------------------------------------------
+// 1. Net Sales (excluding returns)
+// -------------------------------------------------------------------------
+// The base measure. Returned lines stay in the fact table so return
+// behaviour can be analysed, but they never contribute revenue.
+
+Net Sales =
+CALCULATE (
+    SUMX ( Transactions, Transactions[net_amount] ),
+    Transactions[is_return] = FALSE ()
+)
+
+
+// Gross Sales at list price, before any markdown. Used to derive discount
+// depth; not a reporting KPI on its own.
+
+Gross Sales =
+CALCULATE (
+    SUMX ( Transactions, Transactions[gross_amount] ),
+    Transactions[is_return] = FALSE ()
+)
+
+
+// Returned value, kept as a separate measure so returns can be monitored
+// rather than just removed.
+
+Returned Sales =
+CALCULATE (
+    SUMX ( Transactions, Transactions[net_amount] ),
+    Transactions[is_return] = TRUE ()
+)
+
+
+Return Rate % =
+DIVIDE (
+    [Returned Sales],
+    [Net Sales] + [Returned Sales]
+)
+
+
+// -------------------------------------------------------------------------
+// 2. Average Transaction Value (ATV)
+// -------------------------------------------------------------------------
+// Measured per ORDER, not per line. A client buying a coat and a scarf in one
+// visit is one transaction. Counting lines here is the most common way ATV
+// gets understated in a luxury report.
+
+Transaction Count =
+CALCULATE (
+    DISTINCTCOUNT ( Transactions[order_id] ),
+    Transactions[is_return] = FALSE ()
+)
+
+
+ATV =
+DIVIDE ( [Net Sales], [Transaction Count] )
+
+
+// -------------------------------------------------------------------------
+// 3. Average Unit Retail (AUR)
+// -------------------------------------------------------------------------
+// The realised price per item sold, after discount. Together with ATV this
+// separates "clients are buying more pieces" from "clients are buying more
+// expensive pieces" - two very different commercial stories.
+
+Units Sold =
+CALCULATE (
+    SUMX ( Transactions, Transactions[quantity] ),
+    Transactions[is_return] = FALSE ()
+)
+
+
+AUR =
+DIVIDE ( [Net Sales], [Units Sold] )
+
+
+// Units per transaction - the third leg of the ATV decomposition.
+// ATV = AUR x UPT.
+
+UPT =
+DIVIDE ( [Units Sold], [Transaction Count] )
+
+
+// -------------------------------------------------------------------------
+// 4. Repeat Purchase Rate
+// -------------------------------------------------------------------------
+// Share of PURCHASING clients with two or more orders in the selected period.
+// Clients in the CRM who never bought are excluded from the denominator, so
+// prospect records cannot depress the metric.
+
+Purchasing Clients =
+CALCULATE (
+    DISTINCTCOUNT ( Transactions[customer_id] ),
+    Transactions[is_return] = FALSE ()
+)
+
+
+Repeat Clients =
+VAR OrdersPerClient =
+    ADDCOLUMNS (
+        CALCULATETABLE (
+            VALUES ( Transactions[customer_id] ),
+            Transactions[is_return] = FALSE ()
+        ),
+        "@Orders",
+            CALCULATE (
+                DISTINCTCOUNT ( Transactions[order_id] ),
+                Transactions[is_return] = FALSE ()
+            )
+    )
+RETURN
+    COUNTROWS ( FILTER ( OrdersPerClient, [@Orders] >= 2 ) )
+
+
+Repeat Purchase Rate % =
+DIVIDE ( [Repeat Clients], [Purchasing Clients] )
+
+
+// -------------------------------------------------------------------------
+// 5. Full-Price Sales Share
+// -------------------------------------------------------------------------
+// Measured BY VALUE, not by line count. The commercial question is how much
+// revenue is protected from markdown, not how many tickets were full price -
+// and in luxury those two numbers diverge sharply, because discounted baskets
+// skew towards cheaper product.
+
+Full Price Sales =
+CALCULATE (
+    SUMX ( Transactions, Transactions[net_amount] ),
+    Transactions[is_return] = FALSE (),
+    Transactions[is_full_price] = TRUE ()
+)
+
+
+Full Price Share % =
+DIVIDE ( [Full Price Sales], [Net Sales] )
+
+
+// Average markdown depth across everything sold.
+
+Markdown Depth % =
+1 - DIVIDE ( [Net Sales], [Gross Sales] )
+
+
+// -------------------------------------------------------------------------
+// 6. Campaign ROAS
+// -------------------------------------------------------------------------
+// Attributed net revenue per unit of spend. Attribution is last-touch within
+// the campaign window plus a channel-specific tail, resolved upstream in the
+// pipeline and stored on the Campaigns table.
+//
+// Spend lives on the campaign dimension at campaign grain, so it must be
+// aggregated over VALUES(), never summed from the fact table - otherwise the
+// same budget is counted once per attributed order.
+
+Campaign Spend =
+SUMX ( VALUES ( Campaigns[campaign_id] ), CALCULATE ( MAX ( Campaigns[spend] ) ) )
+
+
+Campaign Attributed Revenue =
+CALCULATE (
+    SUMX ( Transactions, Transactions[net_amount] ),
+    Transactions[is_return] = FALSE (),
+    NOT ISBLANK ( Transactions[campaign_id] )
+)
+
+
+Campaign ROAS =
+DIVIDE ( [Campaign Attributed Revenue], [Campaign Spend] )
+
+
+// Cost per acquired order - the figure a marketing director will ask for the
+// moment ROAS is shown.
+
+Campaign Attributed Orders =
+CALCULATE (
+    DISTINCTCOUNT ( Transactions[order_id] ),
+    Transactions[is_return] = FALSE (),
+    NOT ISBLANK ( Transactions[campaign_id] )
+)
+
+
+Cost Per Attributed Order =
+DIVIDE ( [Campaign Spend], [Campaign Attributed Orders] )
+
+
+// -------------------------------------------------------------------------
+// 7. Clienteling Conversion Rate
+// -------------------------------------------------------------------------
+// An interaction counts as converted when the same client places an order
+// within 14 days of it. The window is held in a disconnected parameter table
+// so it can be changed in the report without editing the model.
+//
+//   Attribution Window = 14   (single-value parameter table)
+//
+// Note the inner CALCULATE uses ALL ( 'Date' ) deliberately: the purchase
+// that proves a January appointment converted may fall in February, and
+// leaving the date filter in place would discard it.
+
+Attribution Window Days =
+SELECTEDVALUE ( 'Attribution Parameter'[Days], 14 )
+
+
+Clienteling Interactions =
+COUNTROWS ( Clienteling )
+
+
+Converted Interactions =
+VAR WindowDays = [Attribution Window Days]
+RETURN
+    COUNTROWS (
+        FILTER (
+            Clienteling,
+            VAR ThisClient = Clienteling[customer_id]
+            VAR ThisDate = Clienteling[interaction_date]
+            RETURN
+                CALCULATE (
+                    DISTINCTCOUNT ( Transactions[order_id] ),
+                    ALL ( 'Date' ),
+                    Transactions[customer_id] = ThisClient,
+                    Transactions[is_return] = FALSE (),
+                    Transactions[transaction_date] >= ThisDate,
+                    Transactions[transaction_date] <= ThisDate + WindowDays
+                ) > 0
+        )
+    )
+
+
+Clienteling Conversion Rate % =
+DIVIDE ( [Converted Interactions], [Clienteling Interactions] )
+
+
+// Appointment-only conversion. Appointments, calls and events convert at very
+// different rates, so the blended figure is rarely the one to manage against.
+
+Appointment Conversion Rate % =
+CALCULATE (
+    [Clienteling Conversion Rate %],
+    Clienteling[interaction_type] = "Appointment"
+)
+
+
+// Revenue attributed to clienteling activity, on the same 14-day rule.
+
+Clienteling Attributed Revenue =
+VAR WindowDays = [Attribution Window Days]
+RETURN
+    SUMX (
+        Clienteling,
+        VAR ThisClient = Clienteling[customer_id]
+        VAR ThisDate = Clienteling[interaction_date]
+        RETURN
+            CALCULATE (
+                SUMX ( Transactions, Transactions[net_amount] ),
+                ALL ( 'Date' ),
+                Transactions[customer_id] = ThisClient,
+                Transactions[is_return] = FALSE (),
+                Transactions[transaction_date] >= ThisDate,
+                Transactions[transaction_date] <= ThisDate + WindowDays
+            )
+    )
+
+
+Revenue Per Interaction =
+DIVIDE ( [Clienteling Attributed Revenue], [Clienteling Interactions] )
+
+
+// -------------------------------------------------------------------------
+// 8. Supporting measures for the executive page
+// -------------------------------------------------------------------------
+
+Net Sales LY =
+CALCULATE ( [Net Sales], SAMEPERIODLASTYEAR ( 'Date'[Date] ) )
+
+
+Net Sales YoY % =
+DIVIDE ( [Net Sales] - [Net Sales LY], [Net Sales LY] )
+
+
+// Target achievement. The target sits on the boutique dimension as an annual
+// figure, so it is pro-rated by the share of the year in the current filter.
+
+Sales Target =
+VAR DaysInContext = COUNTROWS ( VALUES ( 'Date'[Date] ) )
+RETURN
+    SUMX (
+        VALUES ( Boutiques[boutique_id] ),
+        CALCULATE ( MAX ( Boutiques[annual_sales_target] ) ) * DIVIDE ( DaysInContext, 365 )
+    )
+
+
+Target Achievement % =
+DIVIDE ( [Net Sales], [Sales Target] )
+
+
+// Revenue concentration - the single most quoted statistic in luxury CRM.
+// Share of Net Sales delivered by the top 10% of clients by spend.
+
+Top Decile Revenue Share % =
+VAR ClientSpend =
+    ADDCOLUMNS (
+        CALCULATETABLE (
+            VALUES ( Customers[customer_id] ),
+            Transactions[is_return] = FALSE ()
+        ),
+        "@Spend", [Net Sales]
+    )
+VAR ClientCount = COUNTROWS ( ClientSpend )
+VAR TopN = ROUNDUP ( ClientCount * 0.1, 0 )
+VAR TopClients = TOPN ( TopN, ClientSpend, [@Spend], DESC )
+RETURN
+    DIVIDE ( SUMX ( TopClients, [@Spend] ), [Net Sales] )

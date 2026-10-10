@@ -1,0 +1,45 @@
+# ---- Generated data -------------------------------------------------------
+# Everything under data/processed is reproducible from the fixed seed with a
+# single command, so it is deliberately not committed. Keep the folder.
+data/processed/*
+!data/processed/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---- Virtual environments -------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Testing and tooling --------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Streamlit ------------------------------------------------------------
+.streamlit/secrets.toml
+
+# ---- Editors and OS -------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Office lock files ----------------------------------------------------
+~$*.xlsx
+~$*.docx

@@ -1,0 +1,19 @@
+# Luxury Retail CRM & Clienteling Analytics
+#
+# Versions are pinned to exactly what this project was built and tested
+# against, so a fresh clone reproduces the published figures byte for byte.
+# Python 3.11 or newer (tested on 3.12.3).
+
+# Data generation and analytics
+pandas==3.0.2
+numpy==2.4.4
+
+# Excel export (multi-sheet workbook)
+openpyxl==3.1.5
+
+# Dashboard
+streamlit==1.65.0
+plotly==7.1.0
+
+# Tests
+pytest==9.1.1
